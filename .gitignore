@@ -1,5 +1,23 @@
-node_modules/
+# Byte-compiled / optimized / DLL files (Python)
 __pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+
+# Node modules (React/Frontend)
+node_modules/
+/frontend/build
+/frontend/dist
+
+# Environment variables & Secrets (CRITICAL)
 .env
-*.pyc
+.env.local
+.env.*.local
+*.json.local
+
+# IDEs and system files
+.vscode/
+.idea/
 .DS_Store

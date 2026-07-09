@@ -96,3 +96,13 @@ git pull origin main
 git switch <yourBranchName>
 git merge main
 ```
+
+## 💾 Commit and Push Your Changes
+
+Once you've finished adding your features and resolved any merge conflicts, commit and push your changes:
+
+```bash
+git add .
+git commit -m "Your message"
+git push origin <yourBranchName>
+```

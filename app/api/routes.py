@@ -4,11 +4,13 @@ from app.api.dependencies import get_async_session
 from typing import Any
 
 from app.models.schemas import ResearchRequest, ResearchRunResponse
-from app.models.models import ResearchRun
+from app.models.models import ResearchRun, Report, ReportFile
 
 from app.graphs.research_graph import research_graph, ResearchState
 
 from app.db.database import async_session_maker
+
+from app.services.pdf_service import generate_pdf_report
 
 router = APIRouter()
 
@@ -21,7 +23,24 @@ async def run_research_background(initial_state: ResearchState):
         try:
             print(f"Background task: Starting graph execution for run: {initial_state['run_id']}")
             final_state: dict[str, Any] = await research_graph.ainvoke(initial_state)
-            print(f"Background task: Graph execution completed. Final state report length: {len(final_state['final_report'])}")
+            
+            final_markdown = final_state.get("final_report", "")
+            topic = final_state.get("topic", "research_report")
+            if final_markdown:
+                # Generate PDF report on disk
+                pdf_path = generate_pdf_report(final_markdown, initial_state['run_id'])
+                print(f"Background task: PDF report generated at {pdf_path}")
+
+            # Create the Report record in the database
+            new_report = Report(
+                run_id=initial_state['run_id'],
+                title=f"Research Report on {topic}",
+                summary=final_markdown[:500] + "...",  # Simple Preview of the report
+                content_json={"raw_markdown": final_markdown}
+            )
+
+            session.add(new_report)
+            await session.flush() # Flush to get the new report ID before committing
             
             # Update the database with the final state
             run = await session.get(ResearchRun, initial_state['run_id'])
@@ -29,6 +48,8 @@ async def run_research_background(initial_state: ResearchState):
                 run.status = "completed"
                 run.progress = 100
                 await session.commit()
+                print(f"Run {initial_state['run_id']} completely finalized with PDF.")
+                
         except Exception as e:
             print(f"Background task: Graph execution error: {e}")
             run = await session.get(ResearchRun, initial_state['run_id'])

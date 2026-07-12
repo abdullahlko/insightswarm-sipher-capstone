@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, Any
 from datetime import datetime
 
 # --- Requests ---
@@ -27,6 +27,25 @@ class ReportFileResponse(BaseModel):
     filename: str
     mime_type: str
     download_url: str # We will generate this dynamically later
+
+    class Config:
+        from_attributes = True
+
+class ReportFileSchema(BaseModel):
+    filename: str
+    mime_type: str
+
+    class Config:
+        from_attributes = True
+
+class ReportResponse(BaseModel):
+    id: str
+    run_id: str
+    title: str
+    summary: Optional[str]
+    created_at: Optional[datetime] = None
+    file: Optional[ReportFileSchema] = None
+    download_url: Optional[str] = None # We will generate this dynamically later
 
     class Config:
         from_attributes = True

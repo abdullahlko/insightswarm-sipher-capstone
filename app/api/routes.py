@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.dependencies import get_async_session
 from typing import Any
 
-from app.models.schemas import ResearchRequest, ResearchRunResponse
+from app.models.schemas import ResearchRequest, ResearchRunResponse, ReportResponse, ReportFileResponse
 from app.models.models import ResearchRun, Report, ReportFile
 
 from app.graphs.research_graph import research_graph, ResearchState
@@ -11,6 +11,11 @@ from app.graphs.research_graph import research_graph, ResearchState
 from app.db.database import async_session_maker
 
 from app.services.pdf_service import generate_pdf_report
+
+from fastapi.responses import FileResponse
+from sqlalchemy.orm import selectinload
+from sqlalchemy import select
+import os
 
 router = APIRouter()
 
@@ -26,21 +31,44 @@ async def run_research_background(initial_state: ResearchState):
             
             final_markdown = final_state.get("final_report", "")
             topic = final_state.get("topic", "research_report")
-            if final_markdown:
-                # Generate PDF report on disk
-                pdf_path = generate_pdf_report(final_markdown, initial_state['run_id'])
-                print(f"Background task: PDF report generated at {pdf_path}")
-
+            pdf_path = None
+            
             # Create the Report record in the database
             new_report = Report(
                 run_id=initial_state['run_id'],
                 title=f"Research Report on {topic}",
-                summary=final_markdown[:500] + "...",  # Simple Preview of the report
+                summary=final_markdown[:500] + "..." if final_markdown else "",  # Simple Preview of the report
                 content_json={"raw_markdown": final_markdown}
             )
 
             session.add(new_report)
             await session.flush() # Flush to get the new report ID before committing
+            
+            # Generate PDF report on disk AFTER report is in the database
+            if final_markdown:
+                try:
+                    pdf_path = generate_pdf_report(final_markdown, initial_state['run_id'])
+                    print(f"Background task: PDF report generated at {pdf_path}")
+                    
+                    # Create the ReportFile record to link the PDF to the report
+                    report_file = ReportFile(
+                        report_id=new_report.id,
+                        file_path=pdf_path,
+                        filename=f"{initial_state['run_id']}.pdf",
+                        mime_type="application/pdf"
+                    )
+                    session.add(report_file)
+                except Exception as pdf_error:
+                    print(f"Background task: PDF generation failed: {pdf_error}")
+                    # Continue without PDF, report still has markdown content
+
+            report_file = ReportFile(
+                report_id=new_report.id,
+                file_path=pdf_path,
+                filename=f"{initial_state['run_id']}.pdf",
+                mime_type="application/pdf"
+            )
+            session.add(report_file)
             
             # Update the database with the final state
             run = await session.get(ResearchRun, initial_state['run_id'])
@@ -49,7 +77,7 @@ async def run_research_background(initial_state: ResearchState):
                 run.progress = 100
                 await session.commit()
                 print(f"Run {initial_state['run_id']} completely finalized with PDF.")
-                
+
         except Exception as e:
             print(f"Background task: Graph execution error: {e}")
             run = await session.get(ResearchRun, initial_state['run_id'])
@@ -116,3 +144,55 @@ async def get_research_status(
     if not run:
         raise HTTPException(status_code=404, detail="Research run not found.")
     return run
+
+# --- Report retrieval endpoint ---
+@router.get("/research/{run_id}/report", response_model=ReportResponse)
+async def get_report_metadata(
+    run_id: str,
+    session: AsyncSession = Depends(get_async_session)
+):
+    # Fetch the report and eagerly load the associated file relationship
+    stmt = select(Report).where(Report.run_id == run_id).options(selectinload(Report.file))
+    result = await session.execute(stmt)
+    report = result.scalar_one_or_none()
+
+    if not report:
+        raise HTTPException(status_code=404, detail="Report not found for this run.")
+    
+    # Create the response dictionary manually to inject the dynamic download URL
+    response_data = {
+        "id": report.id,
+        "run_id": report.run_id,
+        "title": report.title,
+        "summary": report.summary,
+        "file": report.file,
+        "download_url": f"/api/research/{run_id}/download" if report.file else None
+    }
+
+    return response_data
+
+# --- Report file download endpoint ---
+@router.get("/research/{run_id}/download")
+async def download_report_pdf(
+    run_id: str,
+    session: AsyncSession = Depends(get_async_session)
+):
+    # Fetch the report and its associated file
+    stmt = select(ReportFile).join(Report).where(Report.run_id == run_id)
+    result = await session.execute(stmt)
+    report_file = result.scalar_one_or_none()
+
+    if not report_file:
+        raise HTTPException(status_code=404, detail="PDF not generated yet or not found.")
+    
+    # Verify the file actually exists on the disk
+    if not os.path.exists(report_file.file_path):
+        raise HTTPException(status_code=500, detail="PDF record exists, but file is missing from disk.")
+    
+    # Serve the file for download
+    return FileResponse(
+        path=report_file.file_path,
+        filename=report_file.filename,
+        media_type=report_file.mime_type,
+        content_disposition_type="attachment" # Forces the browser to download rather than display
+    )

@@ -1,7 +1,26 @@
 from typing import TypedDict, List, Dict, Any, Annotated
 from langgraph.graph import StateGraph, END
 import operator
+import os
+from langchain_tavily import TavilySearch
+from langchain_groq import ChatGroq
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from dotenv import load_dotenv
 from app.core import get_run_logger
+
+load_dotenv()
+
+# --- Initializations ---
+llm_model = os.getenv("LLM_MODEL", "qwen/qwen3-32b")
+llm = ChatGroq(model=llm_model, temperature=0)
+
+# Initialize the Tavily Search Tool
+tavily_search = TavilySearch(
+    max_results=int(os.getenv("TAVILY_MAX_RESULTS", "3")),
+    topic=os.getenv("TAVILY_TOPIC", "general"),
+    search_depth=os.getenv("TAVILY_SEARCH_DEPTH", "basic")
+)
 
 # --- 1. Define the State ---
 # This is the shared memory object passed between every node.
@@ -30,55 +49,114 @@ def intake_node(state: ResearchState) -> Dict:
     return {"sub_questions": [], "sources": [], "draft": "", "is_verified": False, "error": ""}
 
 def plan_node(state: ResearchState) -> Dict:
-    """Breaks the main topic into sub-questions."""
+    """Uses the LLM to break the main topic into sub-questions."""
     log = get_run_logger(__name__, state['run_id'])
     log.info("PLANNER: Decomposing topic.")
-    # Mock behavior: LLM would normally generate these
-    mock_questions = [
-        f"What is the history of {state['topic']}?",
-        f"What are the current commercial applications of {state['topic']}?"
-    ]
-    return {"sub_questions": mock_questions}
+
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", "You are a research planner. Break the user's topic down into 3 targeted search queries. Return ONLY the queries separated by newlines."),
+        ("user", "Topic: {topic}\nInstructions: {instructions}")
+    ])
+
+    chain = prompt | llm | StrOutputParser()
+    result = chain.invoke({"topic": state["topic"], "instructions": state["instructions"]})
+
+    # Split the response by newline to create our list of sub-questions
+    questions = [q.strip() for q in result.split('\n') if q.strip()]
+
+    return {"sub_questions": questions}
 
 def research_node(state: ResearchState) -> Dict:
-    """Simulates parallel web research for the sub-questions."""
+    """Uses Tavily to search the web for each sub-question."""
     log = get_run_logger(__name__, state['run_id'])
     log.info(f"RESEARCHER: Gathering sources for {len(state['sub_questions'])} questions.")
     
-    try:
-        # Mock behavior: Web scraper would fetch this data
-        mock_sources = [
-            {"url": "https://example.com/1", "title": "Overview", "snippet": "Data about the topic."},
-            {"url": "https://example.com/2", "title": "Market Analysis", "snippet": "Commercial viability stats."}
-        ]
-    except Exception as e:
-        log.error(f"Tavily search exception: {e}", exc_info=True)
-        raise e
-        
+    all_sources = []
+    for question in state["sub_questions"]:
+        log.info(f"Searching for: {question}")
+
+        try:
+            results = tavily_search.invoke({"query": question})
+            
+            # Extract the raw data returned by Tavily
+            if isinstance(results, list):
+                for res in results:
+                    all_sources.append({
+                        "url": res.get("url", ""),
+                        "title": res.get("title", ""),
+                        "content": res.get("content", "")
+                    })
+        except Exception as e:
+            log.error(f"Error during Tavily search: {e}", exc_info=True)
+            state["error"] += f"Error during search for '{question}': {e}\n"
+    
     # Because we used Annotated[..., operator.add] in the state, this will append to the list
-    return {"sources": mock_sources}
+    return {"sources": all_sources}
 
 def synthesize_node(state: ResearchState) -> Dict:
-    """Drafts the initial report from the gathered sources."""
+    """Uses an LLM to draft the report based on gathered sources."""
     log = get_run_logger(__name__, state['run_id'])
     log.info(f"SYNTHESIZER: Writing draft using {len(state['sources'])} sources.")
-    mock_draft = f"# Draft Report: {state['topic']}\n\nBased on {len(state['sources'])} sources, this is the initial draft."
-    return {"draft": mock_draft}
+
+    # Format sources into a readable context block for the LLM
+    context = ""
+    for i, src in enumerate(state['sources']):
+        context += f"Source {i+1}: {src['title']} ({src['url']})\n{src['content']}\n\n"
+        
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", r"""You are an expert researcher. Use the provided sources to write a detailed, structured report in Markdown. 
+        Include inline citations to the sources where appropriate (e.g., [1], [2]).
+        
+        CRITICAL INSTRUCTIONS:
+        1. NO CONVERSATIONAL FILLER: Output ONLY the final Markdown report. Do not include any internal thinking, reasoning, or introductory phrases (e.g., "Okay, the user wants me to...", "Here is the report..."). Start directly with the title (#).
+        2. NO LATEX: Do not use LaTeX formatting (such as $ or $$ delimiters) for math or physics equations. WeasyPrint cannot render it. You MUST use plain text Unicode characters instead (e.g., write |ψ⟩ = α|0⟩ + β|1⟩ instead of $\psi\rangle = \alpha|0\rangle + \beta|1\rangle$).
+        """),
+        ("user", "Topic: {topic}\nInstructions: {instructions}\n\nSources:\n{context}")
+    ])
+
+    chain = prompt | llm | StrOutputParser()
+    draft = chain.invoke({
+        "topic": state["topic"],
+        "instructions": state["instructions"],
+        "context": context
+    })
+
+    return {"draft": draft}
 
 def verify_node(state: ResearchState) -> Dict:
     """Checks the draft for hallucinations or unsupported claims."""
     log = get_run_logger(__name__, state['run_id'])
     log.info("VERIFIER: Checking factual consistency.")
-    # Mock behavior: LLM would check draft against sources
-    is_good = True 
+    
+    if not state.get("sources"):
+        log.info("VERIFIER: No sources available, marking as verified.")
+        return {"is_verified": True}
+    
+    # Format sources for the LLM to reference
+    source_titles = [src.get("title", "") for src in state["sources"]]
+    sources_str = "\n".join(source_titles)
+    
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", "You are a fact-checker. Review the draft against the provided sources and respond with ONLY 'VERIFIED' if the claims are supported, or 'NEEDS_REVISION' if you find unsupported claims or hallucinations."),
+        ("user", "Draft:\n{draft}\n\nSource Titles:\n{sources}")
+    ])
+    
+    chain = prompt | llm | StrOutputParser()
+    result = chain.invoke({
+        "draft": state["draft"],
+        "sources": sources_str
+    }).strip().upper()
+    
+    is_good = "VERIFIED" in result
+    log.info(f"VERIFIER: Result = {result} (is_verified={is_good})")
     return {"is_verified": is_good}
 
 def render_node(state: ResearchState) -> Dict:
-    """Finalizes the text content for PDF generation."""
+    """Prepares the drafted Markdown for HTML/PDF rendering later."""
     log = get_run_logger(__name__, state['run_id'])
-    log.info("RENDERER: Finalizing report structure.")
-    final_text = state["draft"] + "\n\n## Conclusion\nEverything looks verified."
-    return {"final_report": final_text}
+    log.info("RENDERER: Storing final markdown report.")
+
+    return {"final_report": state["draft"]}
 
 # --- 3. Build the Graph ---
 
@@ -119,4 +197,4 @@ def build_research_graph():
     return builder.compile()
 
 # Instantiate the graph so it can be imported elsewhere
-research_graph = build_research_graph()
+research_graph = build_research_graph()

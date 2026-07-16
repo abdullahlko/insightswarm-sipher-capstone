@@ -21,3 +21,8 @@ node_modules/
 .vscode/
 .idea/
 .DS_Store
+# Logging
+logs/
+
+# Reports
+reports/

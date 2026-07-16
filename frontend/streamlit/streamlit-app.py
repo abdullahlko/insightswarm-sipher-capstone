@@ -1,5 +1,6 @@
 import streamlit as st
 
+# Tittle 
 st.markdown(
     """
     <style>
@@ -10,6 +11,7 @@ st.markdown(
     """,unsafe_allow_html=True
 )
 
+# Sub-heading and short description of application
 st.markdown(
    """
     <h1 style='text-align: center; color: #D2D2CF; margin-botom: 0'>
@@ -19,6 +21,7 @@ st.markdown(
     <h3 style='text-align: center; margin-top: 0: color: white;'>
     Autonomous Multi-Agent Academic & Market Research Engine
     </h3>
+
 
     <p style='
         text-align: center;
@@ -34,3 +37,4 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
+

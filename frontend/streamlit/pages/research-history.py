@@ -28,7 +28,7 @@ st.set_page_config(
 # ---------- Styling ----------
 st.markdown(
     """
-        <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     
@@ -294,4 +294,7 @@ else:
 st.write("")
 
 #change app.py to dashboard
-st.button("← Back to Dashboard", on_click=lambda: st.switch_page("pages/streamlit-app.py"))
+st.markdown("<div class='back-button-wrap' style='position: absolute !important; top: 2rem !important; left: 2rem !important; z-index: 1000 !important; width: auto !important;'>", unsafe_allow_html=True)
+if st.button("← Back to Dashboard", key="back_dashboard"):
+    st.switch_page("streamlit-app.py")
+st.markdown("</div>", unsafe_allow_html=True)
